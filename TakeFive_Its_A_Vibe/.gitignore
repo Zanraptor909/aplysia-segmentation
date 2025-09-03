@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Logs
+*.log
+
+# Environment files
+.env*
+.envrc
+
+# IDE settings
+.idea/
+.vscode/
+
+# Cache files (YOLO training metadata)
+*.cache

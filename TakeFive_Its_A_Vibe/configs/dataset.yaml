@@ -1,0 +1,8 @@
+# configs/dataset.yaml
+path: C:/TakeFive_Its_A_Vibe/data
+train: images/train
+val: images/val
+
+names:
+  0: aplysia-DxNw
+

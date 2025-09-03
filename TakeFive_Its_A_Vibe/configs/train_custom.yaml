@@ -1,0 +1,38 @@
+# configs/train_custom.yaml
+# ---- Base ----
+task: segment
+model: yolov8s-seg.pt
+data: configs/dataset.yaml
+epochs: 100
+imgsz: 512              # down from 832 to avoid 12GB spikes; drop to 448 if needed
+batch: 4
+device: 0
+amp: true
+cos_lr: true
+patience: 50
+project: runs
+name: aplysia_seg
+
+# ---- Loader / logging ----
+workers: 0              # Windows-safe; avoids dataloader hangs
+cache: ram              # speeds IO without touching VRAM
+plots: false            # leaner per-epoch logging
+# val: false            # <- uncomment to skip per-epoch val and save VRAM
+
+# ---- Augmentations ----
+fliplr: 0.5
+flipud: 0.0
+degrees: 8
+translate: 0.12
+scale: 0.5
+shear: 1.0
+perspective: 0.0
+hsv_h: 0.015
+hsv_s: 0.65
+hsv_v: 0.45
+mosaic: 0.5
+mixup: 0.1
+copy_paste: 0.35
+auto_augment: randaugment
+erasing: 0.4
+close_mosaic: 15
