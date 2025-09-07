@@ -1,8 +1,8 @@
+# predict_count_webcam.py
 from ultralytics import YOLO
 import cv2
 import numpy as np
-import os
-import time
+import os, time, sys, platform
 from collections import deque
 
 # =========================
@@ -10,53 +10,57 @@ from collections import deque
 # =========================
 # Source toggle
 USE_WEBCAM = True            # True = webcam feed, False = single image
-WEBCAM_ID  = 0               # which webcam to open when USE_WEBCAM=True
+WEBCAM_ID  = 0               # preferred webcam index to try first (0=laptop, 1=USB)
 
 # Paths
-MODEL     = r"C:\TakeFive_Its_A_Vibe\runs\aplysia_seg2\weights\best.pt"   # trained weights
-IMG       = r"C:\TakeFive_Its_A_Vibe\test_image\test_image_5.JPG"         # image path
-SAVE_DIR  = r"C:\TakeFive_Its_A_Vibe\test_image\predict_out"              # output folder
+MODEL     = r"C:\aplysia-segmentation\TakeFive_Its_A_Vibe\runs\seg_v8s\weights\best.pt"  # trained weights
+IMG       = r"C:\aplysia-segmentation\TakeFive_Its_A_Vibe\test_image\test_image.JPG"     # image path
+SAVE_DIR  = r"C:\aplysia-segmentation\TakeFive_Its_A_Vibe\test_image\predict_out"        # output folder
 
-# Inference knobs (tune these to reduce false positives)
+# Inference knobs
 IMG_SIZE      = 960          # 640/960/1280 typical; bigger → finer masks
-CONF_MIN      = 0.30         # ↑ increase to be stricter (0.35–0.50 if too many slugs)
-IOU_NMS       = 0.45         # higher merges more, lower keeps more overlaps
-MAX_DET       = 2000         # per-image cap
-RETINA_MASKS  = True         # higher-res masks (slower/more VRAM)
-DEVICE        = 0            # 0 for first GPU, "cpu" to force CPU
-HALF          = True         # FP16 on GPU (ignored on CPU)
+CONF_MIN      = 0.30         # ↑ increase to be stricter
+IOU_NMS       = 0.45
+MAX_DET       = 2000
+RETINA_MASKS  = True
+DEVICE        = 0            # 0 for first GPU, or "cpu"
+HALF          = True         # FP16 on GPU (ignored when CPU)
 
 # Rendering
-SAVE_FILLED   = True         # save filled overlay on image mode
-SAVE_OUTLINE  = True         # save outline-only on image mode
+SAVE_FILLED   = True         # for image mode
+SAVE_OUTLINE  = True         # for image mode
 COLOR         = (0, 255, 255)  # BGR yellow
-ALPHA         = 0.35           # fill opacity
-THICK         = 2              # outline thickness
-SHOW_HUD      = True           # draw text HUD (count/settings) on preview
+ALPHA         = 0.35
+THICK         = 2
+SHOW_HUD      = True
 
 # Webcam averaging
-SHOW_AVG      = True           # show an average on webcam
-USE_EMA       = True           # True = EMA, False = rolling average
-EMA_ALPHA     = 0.20           # 0..1 (higher = more responsive, less smooth)
-AVG_WINDOW    = 30             # rolling average window if USE_EMA=False
+SHOW_AVG      = True
+USE_EMA       = True         # True = EMA, False = rolling avg
+EMA_ALPHA     = 0.20
+AVG_WINDOW    = 30           # rolling window if USE_EMA=False
+
+# Camera handling
+CANDIDATE_IDS = [WEBCAM_ID, 1, 0, 2, 3, 4]  # order to probe/cycle through
+
 
 # =========================
 # ------- HELPERS ---------
 # =========================
 def masks_to_polys(r):
-    """Return list of OpenCV polygons (Nx1x2 int32) for each mask."""
+    """Return list of OpenCV polygons (Nx1x2 int32) for each mask at original image scale."""
     polys = []
     if r.masks is None:
         return polys
 
-    # Prefer Ultralytics' polygon extraction if available
+    # Prefer Ultralytics polygons if available (already scaled to original image)
     if getattr(r.masks, "xy", None) is not None and len(r.masks.xy):
         for arr in r.masks.xy:
             pts = np.asarray(arr, dtype=np.int32).reshape(-1, 1, 2)
             polys.append(pts)
         return polys
 
-    # Fallback: derive polygons from binary masks
+    # Fallback: derive polys from binary masks (scale handled by r.plot normally; we handle directly)
     m = r.masks.data
     if hasattr(m, "cpu"):
         m = m.cpu().numpy()
@@ -67,37 +71,43 @@ def masks_to_polys(r):
             polys.append(c.astype(np.int32))
     return polys
 
-def predict_on(model, frame_or_path):
+
+def predict_on(model, frame_or_path, device_override=None):
     """Run YOLO with configured settings on a frame (np.ndarray) or path (str)."""
-    results = model(
-        frame_or_path,
+    dev = DEVICE if device_override is None else device_override
+    return model.predict(
+        source=frame_or_path,
         imgsz=IMG_SIZE,
         conf=CONF_MIN,
         iou=IOU_NMS,
         max_det=MAX_DET,
-        device=DEVICE,
-        half=(HALF if DEVICE != "cpu" else False),
+        device=dev,
+        half=(HALF and dev != "cpu"),
         retina_masks=RETINA_MASKS,
         verbose=False,
-    )
-    return results[0]
+        save=False,
+        show=False,
+        show_labels=False,
+        show_conf=False,
+    )[0]
+
 
 def render_frame(r, polys=None, draw_hud=True, window_title="Prediction",
                  avg_value=None, avg_label="Avg"):
     """
     Render polygons (filled + outline) onto original image, add HUD, and show one window.
-    If 'polys' is provided, it is used directly (no recompute). Returns (frame, count, (conf_min, conf_max)).
+    Returns (frame, count, (conf_min, conf_max)).
     """
     orig = r.orig_img.copy()
     polys = polys if polys is not None else masks_to_polys(r)
 
-    # Draw filled
+    # Filled overlay
     if polys:
         overlay = orig.copy()
         cv2.fillPoly(overlay, polys, COLOR)
         orig = cv2.addWeighted(overlay, ALPHA, orig, 1 - ALPHA, 0)
 
-    # Draw outlines
+    # Outlines
     if polys:
         cv2.polylines(orig, polys, isClosed=True, color=COLOR, thickness=THICK)
 
@@ -106,7 +116,8 @@ def render_frame(r, polys=None, draw_hud=True, window_title="Prediction",
     conf_min = conf_max = None
     if r.boxes is not None and r.boxes.conf is not None and len(r.boxes) > 0:
         confs = r.boxes.conf.tolist()
-        conf_min, conf_max = (min(confs), max(confs)) if confs else (None, None)
+        if confs:
+            conf_min, conf_max = min(confs), max(confs)
 
     if draw_hud:
         y = 28
@@ -116,17 +127,16 @@ def render_frame(r, polys=None, draw_hud=True, window_title="Prediction",
         y += 26
         # Average (if provided)
         if avg_value is not None and SHOW_AVG:
-            cv2.putText(orig, f"{avg_label}: {avg_value:.2f}", (10, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 0, 0), 3)
-            cv2.putText(orig, f"{avg_label}: {avg_value:.2f}", (10, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 1)
+            text = f"{avg_label}: {avg_value:.2f}"
+            cv2.putText(orig, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 0, 0), 3)
+            cv2.putText(orig, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 1)
             y += 24
         # Confidence range
         if conf_min is not None:
             cv2.putText(orig, f"Conf: {conf_min:.2f}-{conf_max:.2f}", (10, y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (30, 30, 30), 2)
             y += 24
-        # Settings line
+        # Settings
         cv2.putText(orig, f"Settings: conf={CONF_MIN:.2f} iou={IOU_NMS:.2f} img={IMG_SIZE}",
                     (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (30, 30, 30), 2)
         y += 22
@@ -134,9 +144,35 @@ def render_frame(r, polys=None, draw_hud=True, window_title="Prediction",
         cv2.putText(orig, dev_txt, (10, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (30, 30, 30), 2)
 
-    # Show exactly ONE window (whatever title the caller chose)
+    # Show exactly ONE window
     cv2.imshow(window_title, orig)
     return orig, num_instances, (conf_min, conf_max)
+
+
+def open_camera(cam_id):
+    """Open a camera index with a reliable backend on Windows."""
+    backend = cv2.CAP_DSHOW if platform.system() == "Windows" else 0
+    cap = cv2.VideoCapture(cam_id, backend)
+    # Hint preferred format (drivers may ignore)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS,          30)
+    return cap
+
+
+def find_working_camera():
+    """Try candidate indices; return (cap, id) if one works and delivers frames."""
+    for cid in CANDIDATE_IDS:
+        cap = open_camera(cid)
+        if cap.isOpened():
+            ok1, _ = cap.read()
+            ok2, _ = cap.read()
+            if ok1 or ok2:
+                print(f"🎥 Using camera index {cid}")
+                return cap, cid
+            cap.release()
+    return None, None
+
 
 # =========================
 # --------- MAIN ----------
@@ -146,35 +182,60 @@ def main():
     model = YOLO(MODEL)
 
     if USE_WEBCAM:
-        cap = cv2.VideoCapture(WEBCAM_ID)
-        if not cap.isOpened():
-            print(f"❌ Could not open webcam {WEBCAM_ID}")
+        cap, current_id = find_working_camera()
+        if cap is None:
+            print(f"❌ No working camera found from candidates {CANDIDATE_IDS}")
+            cv2.namedWindow("Webcam")
+            blank = np.zeros((240, 680, 3), np.uint8)
+            cv2.putText(blank, "No camera available. Check privacy settings / close other apps.",
+                        (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.imshow("Webcam", blank); cv2.waitKey(3000); cv2.destroyAllWindows()
             return
-        print("🎥 Webcam mode: press 'q' to quit, 's' to save current frame")
 
-        # Averages
+        print("✅ Webcam mode: 'q' quit, 's' save frame, 'c' cycle camera")
         counts = deque(maxlen=max(1, int(AVG_WINDOW))) if not USE_EMA else None
         ema_val = None
+        forced_cpu = False   # if CUDA fails once, flip this to keep UI alive
 
         while True:
             ok, frame = cap.read()
             if not ok:
-                break
+                # quick retry
+                time.sleep(0.02)
+                ok, frame = cap.read()
+                if not ok:
+                    blank = np.zeros((320, 640, 3), np.uint8)
+                    cv2.putText(blank, f"Camera {current_id}: no frames (press c to switch, q to quit)",
+                                (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    cv2.imshow("Webcam", blank)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                    continue
 
-            # Inference
-            r = predict_on(model, frame)
+            # Inference with CPU fallback on exception
+            try:
+                dev_override = "cpu" if forced_cpu else None
+                r = predict_on(model, frame, device_override=dev_override)
+            except Exception as e:
+                forced_cpu = True
+                err = frame.copy() if isinstance(frame, np.ndarray) else np.zeros((320, 640, 3), np.uint8)
+                cv2.putText(err, "Inference error; switching to CPU…",
+                            (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                msg = str(e)
+                cv2.putText(err, msg[:80] + ("…" if len(msg) > 80 else ""),
+                            (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
+                cv2.imshow("Webcam", err)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+                continue
 
-            # Compute polys and count WITHOUT showing any extra window
             polys = masks_to_polys(r)
             count = len(polys)
 
-            # Averages (EMA or rolling)
+            # Averages
             if SHOW_AVG:
                 if USE_EMA:
-                    if ema_val is None:
-                        ema_val = float(count)
-                    else:
-                        ema_val = EMA_ALPHA * float(count) + (1.0 - EMA_ALPHA) * ema_val
+                    ema_val = float(count) if ema_val is None else (EMA_ALPHA * float(count) + (1.0 - EMA_ALPHA) * ema_val)
                     avg_val, avg_label = ema_val, "EMA"
                 else:
                     counts.append(count)
@@ -183,43 +244,57 @@ def main():
             else:
                 avg_val, avg_label = None, "Avg"
 
-            # Render + show exactly once
-            rendered, count, (cmin, cmax) = render_frame(
+            rendered, _, _ = render_frame(
                 r, polys=polys, draw_hud=SHOW_HUD, window_title="Webcam",
                 avg_value=avg_val, avg_label=avg_label
             )
 
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
+            k = cv2.waitKey(1) & 0xFF
+            if k == ord('q'):
                 break
-            elif key == ord('s'):
+            elif k == ord('s'):
                 ts = time.strftime("%Y%m%d-%H%M%S")
                 suffix = f"_count{count}"
                 if avg_val is not None:
                     suffix += f"_{avg_label.lower()}{avg_val:.2f}"
                 out_path = os.path.join(SAVE_DIR, f"webcam_{ts}{suffix}.png")
-                cv2.imwrite(out_path, rendered)
-                print(f"Saved snapshot -> {out_path}")
+                cv2.imwrite(out_path, rendered); print(f"💾 Saved -> {out_path}")
+            elif k == ord('c'):
+                # cycle cameras
+                try:
+                    idx = CANDIDATE_IDS.index(current_id)
+                    new_id = CANDIDATE_IDS[(idx + 1) % len(CANDIDATE_IDS)]
+                except ValueError:
+                    new_id = WEBCAM_ID
+                print(f"🔁 Switching camera {current_id} → {new_id}")
+                cap.release()
+                cap = open_camera(new_id)
+                if not cap.isOpened():
+                    print(f"❌ Could not open camera {new_id}, reverting…")
+                    cap = open_camera(current_id)
+                    if not cap.isOpened():
+                        print("❌ Lost camera and cannot reopen. Exiting.")
+                        break
+                else:
+                    current_id = new_id
 
         cap.release()
         cv2.destroyAllWindows()
 
     else:
+        # Single image path (one window)
         r = predict_on(model, IMG)
-        # Single image: render once, one window
         rendered, count, (cmin, cmax) = render_frame(
             r, draw_hud=SHOW_HUD, window_title="Image"
         )
 
         base = os.path.splitext(os.path.basename(IMG))[0]
-
         if SAVE_FILLED:
             out_filled = os.path.join(SAVE_DIR, f"{base}_filled.png")
             cv2.imwrite(out_filled, rendered)
             print(f"Saved filled  -> {out_filled}")
 
         if SAVE_OUTLINE:
-            # Outline-only version
             orig = r.orig_img.copy()
             polys = masks_to_polys(r)
             if polys:
@@ -234,6 +309,7 @@ def main():
 
         cv2.waitKey(0)
         cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,6 @@
 # configs/dataset.yaml
-path: C:/TakeFive_Its_A_Vibe/data
+path: C:/aplysia-segmentation/TakeFive_Its_A_Vibe/data  # <-- correct project root
+
 train: images/train
 val: images/val
 

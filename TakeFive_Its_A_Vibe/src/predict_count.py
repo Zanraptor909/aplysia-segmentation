@@ -8,9 +8,9 @@ from tqdm import tqdm
 # =========================
 # ---- CONFIGURABLES ------
 # =========================
-MODEL     = r"C:\TakeFive_Its_A_Vibe\runs\seg_v8s\weights\best.pt"  # trained weights
-IMG       = r"C:\TakeFive_Its_A_Vibe\test_image\test_image_2.JPG"        # image or folder
-SAVE_DIR  = r"C:\TakeFive_Its_A_Vibe\test_image\predict_out"             # output folder
+MODEL     = r"C:\aplysia-segmentation\TakeFive_Its_A_Vibe\runs\seg_v8s4\weights\best.pt"  # trained weights
+IMG       = r"C:\aplysia-segmentation\TakeFive_Its_A_Vibe\test_image\test_image.JPG"        # image or folder
+SAVE_DIR  = r"C:\aplysia-segmentation\TakeFive_Its_A_Vibe\test_image\predict_out"             # output folder
 
 # Inference knobs (tune these to reduce false positives / “too many slugs”)
 IMG_SIZE      = 1280        # larger → finer masks; 640/960/1280 are typical
